@@ -1,4 +1,4 @@
-import ../weave_io/[threadpool, instrumentation]
+import ../weave_io/[threadpool, primitives/instrumentation]
 
 block:
   proc main() =

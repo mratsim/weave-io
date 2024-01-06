@@ -18,10 +18,10 @@ import
     backoff,
     scoped_barriers,
     tasks_flowvars],
-  ./instrumentation,
-  ./primitives/threading/[barriers, topology],
+  ./topology,
+  ./primitives/threading/barriers,
   ./parallel_offloading,
-  ./primitives/[allocs, bithacks]
+  ./primitives/[allocs, bithacks, instrumentation]
 
 export
   topology,

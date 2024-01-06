@@ -77,12 +77,12 @@
 # - "detect" when going through the CPU
 
 when defined(bsd) or defined(ios) or defined(macos) or defined(macosx):
-  import ./topology_bsd
+  import ./primitives/threading/topology_bsd
 elif defined(windows):
   # The following can handle Windows x86 and Windows ARM
-  import ./topology_windows
+  import ./primitives/threading/topology_windows
 elif defined(linux):
-  import ./topology_linux
+  import ./primitives/threading/topology_linux
 else:
   {.error: "Unsupported OS: " & hostOS.}
 

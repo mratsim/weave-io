@@ -8,9 +8,8 @@
 
 import
   std/atomics,
-  ../primitives/allocs,
+  ../primitives/[allocs, instrumentation],
   ../primitives/threading/futexes,
-  ../instrumentation,
   ./scoped_barriers
 
 # Tasks have an efficient design so that a single heap allocation

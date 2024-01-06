@@ -1,5 +1,5 @@
 packageName   = "weave_io"
-version       = "0.2.0"
+version       = "0.3.0"
 author        = "Mamy Ratsimbazafy"
 description   = "A latency and fairness optimized threadpool for IO with decent compute performance."
 license       = "MIT or Apache License 2.0"

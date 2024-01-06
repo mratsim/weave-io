@@ -7,7 +7,7 @@
 
 import
   std/atomics,
-  ../instrumentation
+  ../primitives/instrumentation
 
 # Scoped barrier
 # ----------------------------------------------------------------------------------

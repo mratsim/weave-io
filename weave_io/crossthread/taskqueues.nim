@@ -34,8 +34,7 @@
 
 import
   std/atomics,
-  ../primitives/allocs,
-  ../instrumentation,
+  ../primitives/[allocs, instrumentation],
   ./tasks_flowvars
 
 type
