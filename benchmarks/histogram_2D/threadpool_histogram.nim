@@ -282,8 +282,8 @@ proc main() =
     quit 1
 
   var nthreads: int
-  if existsEnv"CTT_NUM_THREADS":
-    nthreads = getEnv"CTT_NUM_THREADS".parseInt()
+  if existsEnv"WVIO_NUM_THREADS":
+    nthreads = getEnv"WVIO_NUM_THREADS".parseInt()
   else:
     nthreads = countProcessors()
 
@@ -294,9 +294,9 @@ proc main() =
 
   reportConfig("Sequential", 1, matrixSize, boxes)
   runBench(tp, generateHistogramSerial, matrix, boxes, parallel = false)
-  reportConfig("Constantine's threadpool - Parallel Reduce", nthreads, matrixSize, boxes)
+  reportConfig("Weave-IO - Parallel Reduce", nthreads, matrixSize, boxes)
   runBench(tp, generateHistogramThreadpoolReduce, matrix, boxes)
-  # reportConfig("Constantine's threadpool - Parallel For Staged", nthreads, matrixSize, boxes)
+  # reportConfig("Weave-IO - Parallel For Staged", nthreads, matrixSize, boxes)
   # runBench(generateHistogramThreadpoolStaged, matrix, boxes)
 
   wv_free(matrix.buffer)

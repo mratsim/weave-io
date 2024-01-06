@@ -64,7 +64,7 @@ type
     # Execution
     # ------------------
     fn*: proc (env: pointer) {.nimcall, gcsafe, raises: [].}
-    # destroy*: proc (env: pointer) {.nimcall, gcsafe.} # Constantine only deals with plain old env
+    # destroy*: proc (env: pointer) {.nimcall, gcsafe.} # TODO: at the moment Weave-IO only deals with plain old env
     env*{.align:sizeof(int).}: UncheckedArray[byte]
 
   Flowvar*[T] = object
@@ -185,7 +185,7 @@ proc newSpawn*(
   result.hasFuture = false
   result.fn = fn
 
-  when defined(CTT_THREADPOOL_METRICS):
+  when defined(WVIO_THREADPOOL_METRICS):
     result.loopStepsLeft = NotALoop
 
 proc newSpawn*(
@@ -208,7 +208,7 @@ proc newSpawn*(
   result.fn = fn
   cast[ptr[type env]](result.env)[] = env
 
-  when defined(CTT_THREADPOOL_METRICS):
+  when defined(WVIO_THREADPOOL_METRICS):
     result.loopStepsLeft = NotALoop
 
 func ceilDiv_vartime(a, b: auto): auto {.inline.} =

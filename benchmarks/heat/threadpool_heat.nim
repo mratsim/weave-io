@@ -264,8 +264,8 @@ proc verify() =
 
 proc main() =
   var nthreads: int
-  if existsEnv"CTT_NUM_THREADS":
-    nthreads = getEnv"CTT_NUM_THREADS".parseInt()
+  if existsEnv"WVIO_NUM_THREADS":
+    nthreads = getEnv"WVIO_NUM_THREADS".parseInt()
   else:
     nthreads = countProcessors()
 
@@ -299,7 +299,7 @@ proc main() =
   delete(odd)
 
   echo "--------------------------------------------------------------------------"
-  echo "Scheduler:        Constantine's Threadpool"
+  echo "Scheduler:        Weave-IO"
   echo "Benchmark:        heat"
   echo "Threads:          ", nthreads
   when not defined(windows):

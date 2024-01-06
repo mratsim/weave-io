@@ -36,7 +36,7 @@ proc queryNumPhysicalCoresLinux*(): cint =
   var i = cint 0
   while true:
     if i == 64:
-      c_printf("[Constantine's Threadpool] The Linux topology detection fallback only supports up to 64 cores (hardware or software)\n")
+      c_printf("[Weave-IO] The Linux topology detection fallback only supports up to 64 cores (hardware or software)\n")
       return -1
 
     if ((logiCoresBitField shr i) and 1) != 0:
@@ -62,7 +62,7 @@ proc queryNumPhysicalCoresLinux*(): cint =
     let numMatches = f.c_fscanf("%llx", siblingsBitField.addr)
 
     if numMatches != 1:
-      c_printf("[Constantine's Threadpool] Error reading from '%s'\n", path)
+      c_printf("[Weave-IO] Error reading from '%s'\n", path)
 
     # Merge the siblings of current core with the all logicalCores
     logiCoresBitField = logiCoresBitField or siblingsBitField

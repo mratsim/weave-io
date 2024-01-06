@@ -35,10 +35,10 @@ template queryBsdKernel(arg: untyped): cint =
       let ko = sysctl(arg, r.addr, size, []) != 0
 
     if ko:
-      c_printf("[Constantine's Threadpool] sysctl(\"%s\") failure: %s\n", argDesc, strerror(errno))
+      c_printf("[Weave-IO] sysctl(\"%s\") failure: %s\n", argDesc, strerror(errno))
       r = -1
     elif r <= 0:
-      c_printf("[Constantine's Threadpool] sysctl(\"%s\") invalid value: %d\n", argDesc, r)
+      c_printf("[Weave-IO] sysctl(\"%s\") invalid value: %d\n", argDesc, r)
       r = -1
     r
 

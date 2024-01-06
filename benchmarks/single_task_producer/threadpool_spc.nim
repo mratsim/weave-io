@@ -99,8 +99,8 @@ proc main() =
     quit 1
 
   var nthreads: int
-  if existsEnv"CTT_NUM_THREADS":
-    nthreads = getEnv"CTT_NUM_THREADS".parseInt()
+  if existsEnv"WVIO_NUM_THREADS":
+    nthreads = getEnv"WVIO_NUM_THREADS".parseInt()
   else:
     nthreads = countProcessors()
 
@@ -128,7 +128,7 @@ proc main() =
   tp.shutdown()
 
   echo "--------------------------------------------------------------------------"
-  echo "Scheduler:                                     Constantine's Threadpool"
+  echo "Scheduler:                                     Weave-IO"
   echo "Benchmark:                                     SPC (Single task Producer - multi Consumer)"
   echo "Threads:                                       ", nthreads
   echo "Time(ms)                                       ", round(stop - start, 3)

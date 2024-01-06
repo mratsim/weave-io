@@ -108,13 +108,13 @@ proc queryNumPhysicalCoresWindows*(): int32 {.inline.} =
     if lastError == ERROR_INSUFFICIENT_BUFFER:
       info = cast[typeof info](alloca(int size))
     else:
-      c_printf("[Constantine's Threadpool] GetLogicalProcessorInformationEx failure: %d. Cannot query size of CPU information.\n", last_error)
+      c_printf("[Weave-IO] GetLogicalProcessorInformationEx failure: %d. Cannot query size of CPU information.\n", last_error)
       result = -1
       return
 
   if GetLogicalProcessorInformationEx(RelationAll, info, size) == 0:
     let lastError = getLastError()
-    c_printf("[Constantine's Threadpool] GetLogicalProcessorInformationEx failure: %d. Cannot retrieve CPU information.\n", last_error)
+    c_printf("[Weave-IO] GetLogicalProcessorInformationEx failure: %d. Cannot retrieve CPU information.\n", last_error)
     result = -1
     return
 
@@ -129,7 +129,7 @@ proc queryNumPhysicalCoresWindows*(): int32 {.inline.} =
   if count != 0:
     result = count
   else:
-    c_printf("[Constantine's Threadpool] Found 0 physical cores)")
+    c_printf("[Weave-IO] Found 0 physical cores)")
     result = -1
 
 # --------------------------------------------------------------------------------------------

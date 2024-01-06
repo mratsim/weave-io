@@ -213,7 +213,7 @@ func blackScholesSequential(ctx: var Context) =
       when defined(check):
         checkErrors(ctx, i, price)
 
-proc blackScholesConstantine(tp: Threadpool, ctx: ptr Context) =
+proc blackScholesWeaveIO(tp: Threadpool, ctx: ptr Context) =
 
   for j in 0 ..< ctx.numRuns:
     tp.parallelFor i in 0 ..< ctx.numOptions:
@@ -324,8 +324,8 @@ proc main() =
   ctx.parseOptions(input)
 
   var nthreads: int
-  if existsEnv"CTT_NUM_THREADS":
-    nthreads = getEnv"CTT_NUM_THREADS".parseInt()
+  if existsEnv"WVIO_NUM_THREADS":
+    nthreads = getEnv"WVIO_NUM_THREADS".parseInt()
   else:
     nthreads = countProcessors()
 
@@ -338,7 +338,7 @@ proc main() =
 
     let start = wtime_msec()
   let tp = Threadpool.new(numThreads = nthreads)
-  tp.blackScholesConstantine(ctx.addr)
+  tp.blackScholesWeaveIO(ctx.addr)
   tp.shutdown()
 
   when not defined(windows):
@@ -349,7 +349,7 @@ proc main() =
     flt = ru.ru_minflt - flt
 
   echo "--------------------------------------------------------------------------"
-  echo "Scheduler:                                    Constantine"
+  echo "Scheduler:                                    Weave-IO"
   echo "Benchmark:                                    Black & Scholes Option Pricing (including init+shutdown)"
   echo "Threads:                                      ", nthreads
   when not defined(windows):

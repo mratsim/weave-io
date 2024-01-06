@@ -27,7 +27,7 @@ export
   # flowvars
   Flowvar, isSpawned, isReady
 
-when defined(CTT_THREADPOOL_METRICS):
+when defined(WVIO_THREADPOOL_METRICS):
   import ./primitives/[fileio, static_for]
 
 # ############################################################
@@ -179,7 +179,7 @@ type
     # Thefts
     rng: WorkStealingRng        # RNG state to select victims
 
-    when defined(CTT_THREADPOOL_METRICS):
+    when defined(WVIO_THREADPOOL_METRICS):
       counters: Counters
 
   Threadpool* = ptr object
@@ -201,7 +201,7 @@ type
 # ############################################################
 
 template metrics(body: untyped): untyped =
-  when defined(CTT_THREADPOOL_METRICS):
+  when defined(WVIO_THREADPOOL_METRICS):
     block: {.noSideEffect, gcsafe.}: body
 
 template incCounter(ctx: var WorkerContext, name: untyped{ident}, amount = 1) =
@@ -937,7 +937,7 @@ proc wait(scopedBarrier: ptr ScopedBarrier) {.raises:[], gcsafe.} =
 #                                                            #
 # ############################################################
 
-proc ctt_threadpool_new(num_threads: cint): Threadpool {.raises: [ResourceExhaustedError].} =
+proc wvio_threadpool_new(num_threads: cint): Threadpool {.raises: [ResourceExhaustedError].} =
   type TpObj = typeof(default(Threadpool)[]) # due to C import, we need a dynamic sizeof
   let tp = allocHeapUncheckedAlignedPtr(Threadpool, sizeof(TpObj), alignment = 64)
   tp.barrier.init(numThreads)
@@ -969,25 +969,25 @@ proc new*(T: type Threadpool, numThreads = getNumThreadsOS()): T {.inline, raise
   ## Initialize a threadpool that manages `numThreads` threads.
   ## Default to the number of physical processors available.
   ##
-  ## A Constantine's threadpool cannot be instantiated
-  ## on a thread managed by another Constantine's threadpool
+  ## A Weave-IO cannot be instantiated
+  ## on a thread managed by another Weave-IO
   ## including the root thread.
   ##
   ## Mixing with other libraries' threadpools and runtime
   ## will not impact correctness but may impact performance.
-  ctt_threadpool_new(numThreads)
+  wvio_threadpool_new(numThreads)
 
 proc new*(T: type Threadpool, numThreads: int): T {.inline, raises: [ResourceExhaustedError].} =
   ## Initialize a threadpool that manages `numThreads` threads.
   ## Default to the number of physical processors available.
   ##
-  ## A Constantine's threadpool cannot be instantiated
-  ## on a thread managed by another Constantine's threadpool
+  ## A Weave-IO cannot be instantiated
+  ## on a thread managed by another Weave-IO
   ## including the root thread.
   ##
   ## Mixing with other libraries' threadpools and runtime
   ## will not impact correctness but may impact performance.
-  ctt_threadpool_new(cast[cint](numThreads))
+  wvio_threadpool_new(cast[cint](numThreads))
 
 proc cleanup(tp: Threadpool) {.raises: [].} =
   ## Cleanup all resources allocated by the threadpool

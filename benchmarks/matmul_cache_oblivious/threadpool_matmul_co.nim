@@ -149,8 +149,8 @@ proc main() =
     n = 3000
     nthreads: int
 
-  if existsEnv"CTT_NUM_THREADS":
-    nthreads = getEnv"CTT_NUM_THREADS".parseInt()
+  if existsEnv"WVIO_NUM_THREADS":
+    nthreads = getEnv"WVIO_NUM_THREADS".parseInt()
   else:
     nthreads = countProcessors()
 
@@ -194,7 +194,7 @@ proc main() =
   flt = ru.ru_minflt - flt
 
   echo "--------------------------------------------------------------------------"
-  echo "Scheduler:        Constantine's Threadpool"
+  echo "Scheduler:        Weave-IO"
   echo "Benchmark:        Matrix Multiplication (cache oblivious)"
   echo "Threads:          ", nthreads
   echo "Time(ms)          ", stop - start

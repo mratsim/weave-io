@@ -59,9 +59,9 @@ proc spawnVoid(funcCall: NimNode, args, argsTy: NimNode, workerContext, schedule
   let fn = funcCall[0]
   let fnName = $fn
   let withArgs = args.len > 0
-  let tpSpawn_closure = ident("ctt_tpSpawnVoidClosure_" & fnName)
+  let tpSpawn_closure = ident("wvio_tpSpawnVoidClosure_" & fnName)
   var fnCall = newCall(fn)
-  let env = ident("ctt_tpSpawnVoidEnv_")   # typed pointer to env
+  let env = ident("wvio_tpSpawnVoidEnv_")   # typed pointer to env
 
   # Closure unpacker
   var envParams = nnkTupleConstr.newTree()
@@ -85,7 +85,7 @@ proc spawnVoid(funcCall: NimNode, args, argsTy: NimNode, workerContext, schedule
       `fnCall`
 
   # Schedule
-  let task = ident"ctt_tpSpawnVoidTask_"
+  let task = ident"wvio_tpSpawnVoidTask_"
   let scheduleBlock = newCall(schedule, workerContext, task)
 
   # Create the task
@@ -111,9 +111,9 @@ proc spawnVoidAwaitable(funcCall: NimNode, args, argsTy: NimNode, workerContext,
 
   let fn = funcCall[0]
   let fnName = $fn
-  let tpSpawn_closure = ident("ctt_tpSpawnVoidAwaitableClosure_" & fnName)
+  let tpSpawn_closure = ident("wvio_tpSpawnVoidAwaitableClosure_" & fnName)
   var fnCall = newCall(fn)
-  let env = ident("ctt_tpSpawnVoidAwaitableEnv_")   # typed pointer to env
+  let env = ident("wvio_tpSpawnVoidAwaitableEnv_")   # typed pointer to env
 
   # tasks have no return value.
   # 1. The start of the task `env` buffer will store the return value for the flowvar and awaiter/sync
@@ -123,8 +123,8 @@ proc spawnVoidAwaitable(funcCall: NimNode, args, argsTy: NimNode, workerContext,
   # We store the following in task.env:
   #
   # | ptr Task | result | arg₀ | arg₁ | ... | argₙ
-  let fut = ident"ctt_tpSpawnVoidAwaitableFut_"
-  let taskSelfReference = ident"ctt_taskSelfReference"
+  let fut = ident"wvio_tpSpawnVoidAwaitableFut_"
+  let taskSelfReference = ident"wvio_taskSelfReference"
 
   # Closure unpacker
   # env stores | ptr Task | result | arg₀ | arg₁ | ... | argₙ
@@ -153,7 +153,7 @@ proc spawnVoidAwaitable(funcCall: NimNode, args, argsTy: NimNode, workerContext,
       readyWith(`env`[0], true)
 
   # Schedule
-  let task = ident"ctt_tpSpawnVoidAwaitableTask_"
+  let task = ident"wvio_tpSpawnVoidAwaitableTask_"
   let scheduleBlock = newCall(schedule, workerContext, task)
 
   # Create the task
@@ -178,9 +178,9 @@ proc spawnRet(funcCall: NimNode, retTy, args, argsTy: NimNode, workerContext, sc
 
   let fn = funcCall[0]
   let fnName = $fn
-  let tpSpawn_closure = ident("ctt_tpSpawnRetClosure_" & fnName)
+  let tpSpawn_closure = ident("wvio_tpSpawnRetClosure_" & fnName)
   var fnCall = newCall(fn)
-  let env = ident("ctt_tpSpawnRetEnv_")   # typed pointer to env
+  let env = ident("wvio_tpSpawnRetEnv_")   # typed pointer to env
 
   # tasks have no return value.
   # 1. The start of the task `env` buffer will store the return value for the flowvar and awaiter/sync
@@ -190,9 +190,9 @@ proc spawnRet(funcCall: NimNode, retTy, args, argsTy: NimNode, workerContext, sc
   # We store the following in task.env:
   #
   # | ptr Task | result | arg₀ | arg₁ | ... | argₙ
-  let fut = ident"ctt_tpSpawnRetFut_"
-  let taskSelfReference = ident"ctt_taskSelfReference"
-  let retVal = ident"ctt_retVal"
+  let fut = ident"wvio_tpSpawnRetFut_"
+  let taskSelfReference = ident"wvio_taskSelfReference"
+  let retVal = ident"wvio_retVal"
 
   # Closure unpacker
   # env stores | ptr Task | result | arg₀ | arg₁ | ... | argₙ
@@ -222,7 +222,7 @@ proc spawnRet(funcCall: NimNode, retTy, args, argsTy: NimNode, workerContext, sc
 
   # Schedule
   let retTy = ident($retTy) # Regenerate fresh ident, retTy has been tagged as a function call param
-  let task = ident"ctt_tpSpawnRetTask_"
+  let task = ident"wvio_tpSpawnRetTask_"
   let scheduleBlock = newCall(schedule, workerContext, task)
 
   # Create the task
@@ -574,7 +574,7 @@ proc generateAndScheduleLoopTask(ld: LoopDescriptor): NimNode =
   # Dependencies
   # ---------------------------------------------------
   var scheduleBlock: NimNode
-  let task = ident"ctt_tpLoopTask_"
+  let task = ident"wvio_tpLoopTask_"
   # TODO: Dataflow parallelism / precise task dependencies
   scheduleBlock = newCall(ld.scheduleFn, ld.workerContext, task)
 
@@ -730,14 +730,14 @@ proc parallelForImpl*(workerContext, scheduleFn, loopTemplate, loopBounds, body:
   # Code generation
   # --------------------------------------------------------
   ld.loopTemplate = loopTemplate
-  ld.loopFnName   = ident("ctt_tpParForImpl_")
-  ld.envName      = ident("ctt_tpParForEnv_")
+  ld.loopFnName   = ident("wvio_tpParForImpl_")
+  ld.envName      = ident("wvio_tpParForEnv_")
   result.add ld.generateParallelLoop()
 
-  ld.closureName  = ident("ctt_tpParForClosure_")
+  ld.closureName  = ident("wvio_tpParForClosure_")
   result.add ld.generateClosure()
 
-  ld.taskName     = ident("ctt_tpParForTask_")
+  ld.taskName     = ident("wvio_tpParForTask_")
   result.add ld.generateAndScheduleLoopTask()
 
 # Parallel reductions
@@ -904,14 +904,14 @@ proc parallelReduceImpl*(workerContext, scheduleFn, loopTemplate, loopBounds, bo
   # Code generation
   # --------------------------------------------------------
   ld.loopTemplate = loopTemplate
-  ld.loopFnName   = ident("ctt_tpParReduceImpl_")
-  ld.envName      = ident("ctt_tpParReduceEnv_")
+  ld.loopFnName   = ident("wvio_tpParReduceImpl_")
+  ld.envName      = ident("wvio_tpParReduceEnv_")
   result.add ld.generateParallelLoop()
 
-  ld.closureName  = ident("ctt_tpParReduceClosure_")
+  ld.closureName  = ident("wvio_tpParReduceClosure_")
   result.add ld.generateClosure()
 
-  ld.taskName     = ident("ctt_tpParReduceTask_")
+  ld.taskName     = ident("wvio_tpParReduceTask_")
   result.add ld.generateAndScheduleLoopTask()
 
 # ############################################################

@@ -70,7 +70,7 @@ proc sequentialTranspose(tp: Threadpool, M, N: int, bufIn, bufOut: ptr Unchecked
     for i in 0 ..< M:
       bufOut[j*M+i] = bufIn[i*N+j]
 
-proc cttNaiveTranspose(tp: Threadpool, M, N: int, bufIn, bufOut: ptr UncheckedArray[float32]) =
+proc wvioNaiveTranspose(tp: Threadpool, M, N: int, bufIn, bufOut: ptr UncheckedArray[float32]) =
   ## Transpose a MxN matrix into a NxM matrix
 
   # Write are more expensive than read so we keep i accesses linear for writes
@@ -79,7 +79,7 @@ proc cttNaiveTranspose(tp: Threadpool, M, N: int, bufIn, bufOut: ptr UncheckedAr
     for i in 0 ..< M:
       bufOut[j*M+i] = bufIn[i*N+j]
 
-proc cttNestedTranspose(tp: Threadpool, M, N: int, bufIn, bufOut: ptr UncheckedArray[float32]) =
+proc wvioNestedTranspose(tp: Threadpool, M, N: int, bufIn, bufOut: ptr UncheckedArray[float32]) =
   ## Transpose a MxN matrix into a NxM matrix with nested for loops
 
   tp.parallelFor j in 0 ..< N:
@@ -88,7 +88,7 @@ proc cttNestedTranspose(tp: Threadpool, M, N: int, bufIn, bufOut: ptr UncheckedA
       captures: {j, M, N, bufIn, bufOut}
       bufOut[j*M+i] = bufIn[i*N+j]
 
-proc ctt2DTiledNestedTranspose(tp: Threadpool, M, N: int, bufIn, bufOut: ptr UncheckedArray[float32]) =
+proc wvio2DTiledNestedTranspose(tp: Threadpool, M, N: int, bufIn, bufOut: ptr UncheckedArray[float32]) =
   ## Transpose with 2D tiling and nested
 
   const blck = 64 # const do not need to be captured
@@ -148,7 +148,7 @@ proc report(
   let nxmPerf = reqOps.float/(nxmTime*1e-3 / nrounds.float) * 1e-9 # Gops per second
 
   echo "--------------------------------------------------------------------------"
-  echo "Scheduler:                                    Constantine's threadpool"
+  echo "Scheduler:                                    Weave-IO"
   echo "Benchmark:                                    Transpose - ", $transposeStrategy
   echo "Threads:                                      ", nthreads
   echo "# of rounds:                                  ", nrounds
@@ -292,8 +292,8 @@ proc main() =
   var nthreads: int32
   if transposeStrat == Sequential:
     nthreads = 1
-  elif existsEnv"CTT_NUM_THREADS":
-    nthreads = getEnv"CTT_NUM_THREADS".parseInt().int32
+  elif existsEnv"WVIO_NUM_THREADS":
+    nthreads = getEnv"WVIO_NUM_THREADS".parseInt().int32
   else:
     nthreads = countProcessors().int32
 
@@ -309,9 +309,9 @@ proc main() =
   var tp: Threadpool
   case transposeStrat
   of Sequential: tp.runBench(sequentialTranspose, reorderCompute, isSequential)
-  of Naive: tp.runBench(cttNaiveTranspose, reorderCompute, isSequential)
-  of Nested: tp.runBench(cttNestedTranspose, reorderCompute, isSequential)
-  of TiledNested: tp.runBench(ctt2DTiledNestedTranspose, reorderCompute, isSequential)
+  of Naive: tp.runBench(wvioNaiveTranspose, reorderCompute, isSequential)
+  of Nested: tp.runBench(wvioNestedTranspose, reorderCompute, isSequential)
+  of TiledNested: tp.runBench(wvio2DTiledNestedTranspose, reorderCompute, isSequential)
 
   wv_free(bufOut)
   wv_free(bufIn)

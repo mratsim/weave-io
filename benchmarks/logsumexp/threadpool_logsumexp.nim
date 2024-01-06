@@ -355,8 +355,8 @@ proc main() =
     quit 1
 
   var nthreads: int
-  if existsEnv"CTT_NUM_THREADS":
-    nthreads = getEnv"CTT_NUM_THREADS".parseInt()
+  if existsEnv"WVIO_NUM_THREADS":
+    nthreads = getEnv"WVIO_NUM_THREADS".parseInt()
   else:
     nthreads = countProcessors()
 
@@ -379,19 +379,19 @@ proc main() =
 
   # TODO: The parallel algorithm is slower than Weave AND slower than serial
 
-  reportConfig("Constantine's Threadpool Reduce", nthreads, datasetSize, batchSize, imageLabels, textVocabulary)
+  reportConfig("Weave-IO Reduce", nthreads, datasetSize, batchSize, imageLabels, textVocabulary)
   block:
     tp.runBench(logsumexpThreadpoolReduce, datasetSize, batchSize, imageLabels)
   block:
     tp.runBench(logsumexpThreadpoolReduce, datasetSize, batchSize, textVocabulary)
 
-  reportConfig("Constantine's Threadpool (Collapsed)", nthreads, datasetSize, batchSize, imageLabels, textVocabulary)
+  reportConfig("Weave-IO (Collapsed)", nthreads, datasetSize, batchSize, imageLabels, textVocabulary)
   block:
     tp.runBench(logsumexpThreadpoolCollapsed, datasetSize, batchSize, imageLabels)
   block:
     tp.runBench(logsumexpThreadpoolCollapsed, datasetSize, batchSize, textVocabulary)
 
-  # reportConfig("Constantine's Threadpool (Staged)", nthreads, datasetSize, batchSize, imageLabels, textVocabulary)
+  # reportConfig("Weave-IO (Staged)", nthreads, datasetSize, batchSize, imageLabels, textVocabulary)
   # block:
   #   tp.runBench(logsumexpThreadpoolStaged, datasetSize, batchSize, imageLabels)
   # block:

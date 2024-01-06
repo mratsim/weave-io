@@ -41,8 +41,8 @@ proc main() =
     answer: uint32
     nthreads: int
 
-  if existsEnv"CTT_NUM_THREADS":
-    nthreads = getEnv"CTT_NUM_THREADS".parseInt()
+  if existsEnv"WVIO_NUM_THREADS":
+    nthreads = getEnv"WVIO_NUM_THREADS".parseInt()
   else:
     nthreads = countProcessors()
 
@@ -81,7 +81,7 @@ proc main() =
     let stopRuntime = wtime_usec()
 
   echo "--------------------------------------------------------------------------"
-  echo "Scheduler:        Constantine's Threadpool"
+  echo "Scheduler:        Weave-IO"
   echo "Benchmark:        dfs"
   echo "Threads:          ", nthreads
   when not defined(windows):

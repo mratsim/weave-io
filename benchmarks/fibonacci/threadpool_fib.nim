@@ -35,8 +35,8 @@ proc main() =
     echo &"Usage: {exeName} <n-th fibonacci number requested:{n}>"
     quit 1
 
-  if existsEnv"CTT_NUM_THREADS":
-    nthreads = getEnv"CTT_NUM_THREADS".parseInt()
+  if existsEnv"WVIO_NUM_THREADS":
+    nthreads = getEnv"WVIO_NUM_THREADS".parseInt()
   else:
     nthreads = countProcessors()
 
@@ -64,7 +64,7 @@ proc main() =
     flt = ru.ru_minflt - flt
 
   echo "--------------------------------------------------------------------------"
-  echo "Scheduler:                                    Constantine's Threadpool"
+  echo "Scheduler:                                    Weave-IO"
   echo "Benchmark:                                    Fibonacci"
   echo "Threads:                                      ", nthreads
   when not defined(windows):

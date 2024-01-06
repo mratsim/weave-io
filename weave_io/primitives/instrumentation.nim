@@ -15,15 +15,15 @@ template log*(args: varargs[untyped]): untyped =
   c_fflush(stdout)
 
 template debugSplit*(body: untyped): untyped =
-  when defined(CTT_THREADPOOL_DEBUG_SPLIT) or defined(CTT_THREADPOOL_DEBUG):
+  when defined(WVIO_THREADPOOL_DEBUG_SPLIT) or defined(WVIO_THREADPOOL_DEBUG):
     {.noSideEffect, gcsafe.}: body
 
 template debugTermination*(body: untyped): untyped =
-  when defined(CTT_THREADPOOL_DEBUG_TERMINATION) or defined(CTT_THREADPOOL_DEBUG):
+  when defined(WVIO_THREADPOOL_DEBUG_TERMINATION) or defined(WVIO_THREADPOOL_DEBUG):
     {.noSideEffect, gcsafe.}: body
 
 template debug*(body: untyped): untyped =
-  when defined(CTT_THREADPOOL_DEBUG):
+  when defined(WVIO_THREADPOOL_DEBUG):
     {.noSideEffect, gcsafe.}: body
 
 # --------------------------------------------------------
@@ -34,7 +34,7 @@ import std/macros
 # --------------------------------------------------------
 
 # Everything should be a template that doesn't produce any code
-# when CTT_DEBUG is not defined.
+# when WVIO_DEBUG is not defined.
 # Those checks are controlled by a custom flag instead of
 # "--boundsChecks" or "--nilChecks" to decouple them from user code checks.
 # Furthermore, we want them to be very lightweight on performance
@@ -118,7 +118,7 @@ macro assertContract(
     {.noSideEffect.}:
       when compileOption("assertions"):
         assert(`predicate`, `debug` & $`values` & "  [Worker " & `workerID` & " on threadpool " & `threadpoolID` & "]\n")
-      elif defined(CTT_THREADPOOL_ASSERTS):
+      elif defined(WVIO_THREADPOOL_ASSERTS):
         if unlikely(not(`predicate`)):
           raise newException(AssertionError, `debug` & $`values` & "  [Worker " & `workerID` & " on threadpool " & `threadpoolID` & "]\n")
 
@@ -162,7 +162,7 @@ macro getCounter*(counters: untyped, counterField: static string): untyped =
 # Profiling
 # ----------------------------------------------------------------------------------
 
-when defined(CTT_THREADPOOL_PROFILE):
+when defined(WVIO_THREADPOOL_PROFILE):
   import ./primitives/timers
   # On windows and Mac, timers.nim uses globals which we want to avoid where possible
 
