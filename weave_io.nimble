@@ -57,16 +57,7 @@ when defined(windows):
   const stackHardening = ""
 else:
   const stackHardening =
-
     " --passC:-fstack-protector-strong " &
-
-    # Fortify source wouldn't help us detect errors in Constantine
-    # because everything is stack allocated
-    # except with the threadpool:
-    # - https://developers.redhat.com/blog/2021/04/16/broadening-compiler-checks-for-buffer-overflows-in-_fortify_source#what_s_next_for__fortify_source
-    # - https://developers.redhat.com/articles/2023/02/06/how-improve-application-security-using-fortifysource3#how_to_improve_application_fortification
-    # We also don't use memcpy as it is not constant-time and our copy is compile-time sized.
-
     " --passC:-D_FORTIFY_SOURCE=3 "
 
   const sanitizers =

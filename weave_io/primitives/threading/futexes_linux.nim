@@ -1,5 +1,5 @@
-# Weave
-# Copyright (c) 2019 Mamy André-Ratsimbazafy
+# Weave-IO
+# Copyright (c) 2024-Present Mamy André-Ratsimbazafy
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at http://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at http://www.apache.org/licenses/LICENSE-2.0).
