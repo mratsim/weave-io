@@ -47,15 +47,15 @@ type
     # Synchronization
     # ------------------
     state: TaskState
-    parent*: ptr Task  # Latency: When a task is awaited, a thread can quickly prioritize its direct children.
-    next*: ptr Task    # Intrusive LinkedList for tasks in global taskqueue
+    parent*: ptr Task       # Latency: When a task is awaited, a thread can quickly prioritize its direct children.
+    next*: Atomic[ptr Task] # Intrusive LinkedList for tasks in global taskqueue
     scopedBarrier*: ptr ScopedBarrier
-    hasFuture*: bool   # Ownership: if a task has a future, the future deallocates it. Otherwise the worker thread does.
+    hasFuture*: bool        # Ownership: if a task has a future, the future deallocates it. Otherwise the worker thread does.
 
     # Data parallelism
     # ------------------
-    isFirstIter*: bool # Load-Balancing: New loops are split before first iter. Split loops are run once before reconsidering split.
-    envSize*: int32    # Metadata: In splittable loops we need to copy the `env` upon splitting
+    isFirstIter*: bool      # Load-Balancing: New loops are split before first iter. Split loops are run once before reconsidering split.
+    envSize*: int32         # Metadata: In splittable loops we need to copy the `env` upon splitting
     loopStart*: int
     loopStop*: int
     loopStride*: int

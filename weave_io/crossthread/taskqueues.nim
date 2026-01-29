@@ -31,23 +31,48 @@ import
   ../primitives/instrumentation,
   ./tasks_flowvars
 
-const WVIO_TASKQUEUE_SIZE {.intdefine.} = 256
-const MASK_MOD_SIZE=WVIO_TASKQUEUE_SIZE-1
+const WVIO_TASKQUEUE_SIZE* {.intdefine.} = 256
+const MASK_MOD_SIZE = WVIO_TASKQUEUE_SIZE - 1
 
 type
-  OverflowQueue = concept q, var mutq
-    mutq.trySend(sink Task) is bool
-
-  TaskQueue[OQ: OverflowQueue] = object
+  TaskQueue* = object
     ## Lockless single-producer multi-consumer FIFO queue
     front{.align: 64.}: Atomic[int]
     back: Atomic[int]
     lifoSlot{.align: 64.}: Atomic[ptr Task]
-      ## A single-LIFO slot to optimize latency for actor-like pattern (i.e. workers spawning a task and blocking on it)
-      ## This also help reclaim some throughput by scheduling a task that will likely
-      ## reuse data already hot in cache for example when doing parallel divide-and-conquer
+    ## A single-LIFO slot to optimize latency for actor-like pattern (i.e. workers spawning a task and blocking on it)
+    ## This also help reclaim some throughput by scheduling a task that will likely
+    ## reuse data already hot in cache for example when doing parallel divide-and-conquer
     buf{.align: 64.}: array[WVIO_TASKQUEUE_SIZE, ptr Task]
-    overflowQueue: ptr OQ
+
+proc init*(tq: var TaskQueue) {.inline.} =
+  ## Initialize the task queue
+  tq.front.store(0, moRelaxed)
+  tq.back.store(0, moRelaxed)
+  tq.lifoSlot.store(nil, moRelaxed)
+
+proc teardown*(tq: var TaskQueue) {.inline.} =
+  ## Cleanup the task queue (currently a no-op, but provided for API consistency)
+  discard
+
+proc peek*(tq: var Taskqueue): int =
+  ## Estimates the number of items pending in the channel
+  ## In a SPMC setting
+  ## - If called by the producer the true number might be less
+  ##   due to consumers removing items concurrently.
+  ## - If called by a consumer the true number is undefined
+  ##   as other consumers also remove items concurrently and
+  ##   the producer removes them concurrently.
+  ##
+  ## This is a non-locking operation.
+  let # Handle race conditions
+    b = tq.back.load(moRelaxed)  # Only the producer peeks in the threadpool so moRelaxed is enough
+    f = tq.front.load(moAcquire)
+
+  if b >= f:
+    return b-f
+  else:
+    return 0
 
 proc enqueue*(tq: var Taskqueue, task: ptr Task, useLifo: bool) =
   ## Enqueue a task to the back
@@ -87,7 +112,7 @@ proc enqueue*(tq: var Taskqueue, task: ptr Task, useLifo: bool) =
   var task = task
   if useLifo:
     while true:
-      let oldLifo = tq.lifoSlot.load(moRelaxed)
+      var oldLifo = tq.lifoSlot.load(moRelaxed)
       if not tq.lifoSlot.compareExchange(oldLifo, task, moAcquire, moRelease):
         # retry, lifo slot was stolen
         continue
@@ -97,14 +122,32 @@ proc enqueue*(tq: var Taskqueue, task: ptr Task, useLifo: bool) =
       task = oldLifo
       break
 
-  let f = tq.front.load(moAcquire)
   let b = tq.back.load(moRelaxed)
 
-  if b-f < WVIO_TASKQUEUE_SIZE:
-    tq.buf[b and MASK_MOD_SIZE] = task
-    tq.b.store(b+1, moRelease)
-  else:
-    discard tq.overflowQueue.trySend(task)
+  ascertain:
+    let f = tq.front.load(moAcquire)
+    b-f < WVIO_TASKQUEUE_SIZE
+  tq.buf[b and MASK_MOD_SIZE] = task
+  tq.back.store(b+1, moRelease)
+
+proc enqueueBatch*(tq: var Taskqueue, taskList: ptr Task) =
+  ## Enqueue from a linked list of tasks
+  ## The slots left
+  let b = tq.back.load(moRelaxed)
+  ascertain:
+    let f = tq.front.load(moAcquire)
+    b-f < WVIO_TASKQUEUE_SIZE
+
+  var current = taskList
+  var i = 0
+  while not current.isNil:
+    let next = current.next.load(moRelaxed)
+    tq.buf[b+i and MASK_MOD_SIZE] = current
+    i += 1
+    current = next
+
+  tq.back.store(b+i, moRelease)
+  postCondition: i <= WVIO_TASKQUEUE_SIZE
 
 proc dequeue*(tq: var TaskQueue): tuple[task: ptr Task, sameBudget: bool] =
   ## Dequeue a task either from the LIFO slot
@@ -115,14 +158,14 @@ proc dequeue*(tq: var TaskQueue): tuple[task: ptr Task, sameBudget: bool] =
   ## or not to track fairness of execution' resource usage
   ##
   ## Only the queue owner should call this.
-  let task = tq.lifoSlot.load(moRelaxed)
+  var task = tq.lifoSlot.load(moRelaxed)
 
   # Only the queue owner can add to the lifoSlot, so no need to loop this CAS
-  if not task.isNil and tq.lifoSlot(task, nil, moAcquire, moRelease):
+  if not task.isNil and tq.lifoSlot.compareExchange(task, nil, moAcquire, moRelease):
     return (task, true)
 
   while true:
-    let f = tq.front.load(moAcquire)
+    var f = tq.front.load(moAcquire)
     let b = tq.back.load(moRelaxed)
     if b-f == 0:
       return (nil, false)
@@ -131,4 +174,49 @@ proc dequeue*(tq: var TaskQueue): tuple[task: ptr Task, sameBudget: bool] =
     if tq.front.compareExchange(f, f+1, moAcquire, moRelease):
       return (task, false)
 
-proc stealOne*
+proc stealOne*(thiefID: int32, tq: var TaskQueue): ptr Task =
+  ## Steal from `tq`
+  while true:
+    var f = tq.front.load(moAcquire)
+    fence(moSequentiallyConsistent)
+    let b = tq.back.load(moAcquire)
+
+    if b <= f:
+      return nil
+
+    let task = tq.buf[f and MASK_MOD_SIZE]
+    if tq.front.compareExchange(f, f + 1, moSequentiallyConsistent, moRelaxed):
+      task.setThief(thiefID)
+      return task
+
+proc stealHalf*(thiefID: int32, tq: var TaskQueue, into: var TaskQueue): (ptr Task, int32) =
+  ## Steal from `tq` copy into `into`.
+  ## `into` MUST be the local queue owned by the caller of stealHalf
+  preCondition: into.peek() == 0
+  while true:
+    var f = tq.front.load(moAcquire)
+    fence(moSequentiallyConsistent)
+    let b = tq.back.load(moAcquire)
+
+    if b <= f:
+      return (nil, 0)
+
+    let count = b - f
+    let halfCount = count - (count shr 1) # Rounding up
+
+    if tq.front.compareExchange(f, f + halfCount, moSequentiallyConsistent, moRelaxed):
+      if halfCount > 1:
+        # Copy all tasks except the first to `into` queue.
+        let into_back = into.back.load(moRelaxed)
+        for i in 1 ..< halfCount:
+          let task = tq.buf[(f + i) and MASK_MOD_SIZE]
+          task.setThief(thiefID)
+          into.buf[into_back+i-1 and MASK_MOD_SIZE] = task
+        into.back.store(halfCount-1, moRelease)
+
+      # Return the first task
+      let task = tq.buf[f and MASK_MOD_SIZE]
+      task.setThief(thiefID)
+      return (task, int32 halfCount)
+
+{.pop.}
