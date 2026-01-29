@@ -48,6 +48,7 @@ type
     # ------------------
     state: TaskState
     parent*: ptr Task  # Latency: When a task is awaited, a thread can quickly prioritize its direct children.
+    next*: ptr Task    # Intrusive LinkedList for tasks in global taskqueue
     scopedBarrier*: ptr ScopedBarrier
     hasFuture*: bool   # Ownership: if a task has a future, the future deallocates it. Otherwise the worker thread does.
 
