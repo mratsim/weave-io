@@ -445,13 +445,15 @@ proc schedule(ctx: var WorkerContext, task: ptr Task, forceWake = false) {.inlin
   ## Schedule a task in the threadpool
   ## This wakes another worker if our local queue is empty
   ## or forceWake is true.
-  debug: log("Worker %3d: schedule task 0x%.08x (parent/current task 0x%.08x, scope 0x%.08x)\n", ctx.id, task, task.parent, task.scopedBarrier)
 
   # Instead of notifying every time a task is scheduled, we notify
   # only when the worker queue is empty. This is a good approximation
   # of starvation in work-stealing.
   let numTasks = ctx.taskqueue[].peek()
+  debug:
+    let numGlobalTasks = ctx.threadpool.globalQueue.peek()
   if numTasks < WVIO_TASKQUEUE_SIZE:
+    debug: log("Worker %3d: schedule task 0x%.08x in local queue (pending local/global %d/%d, parent/current task 0x%.08x, scope 0x%.08x)\n", ctx.id, task, numTasks, numGlobalTasks, task.parent, task.scopedBarrier)
     ctx.taskqueue[].enqueue(task, useLifo = true)
 
     ctx.incCounter(tasksScheduled)
@@ -459,6 +461,7 @@ proc schedule(ctx: var WorkerContext, task: ptr Task, forceWake = false) {.inlin
       if task.loopStepsLeft == NotALoop: 0
       else: task.loopStepsLeft
   else: # local queue full
+    debug: log("Worker %3d: schedule task 0x%.08x in global queue (pending local/global %d/%d, parent/current task 0x%.08x, scope 0x%.08x)\n", ctx.id, task, numTasks, numGlobalTasks, task.parent, task.scopedBarrier)
     ctx.threadpool.globalQueue.send(task)
 
   if forceWake or numTasks == 0:
@@ -778,6 +781,8 @@ proc tryLeapfrog(ctx: var WorkerContext, awaitedTask: ptr Task): ptr Task =
   ## If they have tasks in their queue, it's the task we are awaiting that created them and it will likely be stuck
   ## on those tasks as well, so we need to help them help us.
 
+  # TODO: We might want a sentinel value for tasks sent back to global queues
+
   let thiefID = awaitedTask.getThief()
   if thiefID != SentinelThief:
     debug: log("Worker %3d: leapfrogging - thief found for task 0x%.08x (thiefID %d)\n", ctx.id, awaitedTask, thiefID)
@@ -857,18 +862,39 @@ proc eventLoop(ctx: var WorkerContext) {.raises:[], gcsafe.} =
       # 2.a Run task
       debug: log("Worker %3d: eventLoop 2.a - stole task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, stolenTask, stolenTask.parent, ctx.currentTask)
       ctx.run(stolenTask)
+    elif (
+        var globalTask = ctx.tryDrainGlobalQueue()
+        ctx.globalQueueCheckCounter = 0
+        not globalTask.isNil):
+      # We got a task from the global queue, cancel sleep
+      # We manage to steal a task, cancel sleep
+      ctx.threadpool.globalBackoff.cancelSleep()
+      # Theft successful, there might be more work for idle threads, wake one
+      # cancelSleep must be done before as wake has an optimization
+      # to not notify when a thread is sleepy
+      ctx.threadpool.globalBackoff.wake()
+      ctx.incCounter(backoffGlobalSignalSent)
+
+      ctx.incCounter(theftsIdle)
+      ctx.incCounter(itersStolen):
+        if globalTask.loopStepsLeft == NotALoop: 0
+        else: globalTask.loopStepsLeft
+      # 2.a Run task
+      debug: log("Worker %3d: eventLoop 2.a - stole task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, globalTask, globalTask.parent, ctx.currentTask)
+      ctx.run(globalTask)
+
     elif ctx.signal.terminate.load(moAcquire):
       # 2.b Threadpool has no more tasks and we were signaled to terminate
       ctx.threadpool.globalBackoff.cancelSleep()
-      debugTermination: log("Worker %3d: eventLoop 2.b - terminated\n", ctx.id)
+      debugTermination: log("Worker %3d: eventLoop 2.c - terminated\n", ctx.id)
       break
     else:
       # 2.c Park the thread until a new task enters the threadpool
-      debugTermination: log("Worker %3d: eventLoop 2.b - sleeping\n", ctx.id)
+      debugTermination: log("Worker %3d: eventLoop 2.d - sleeping\n", ctx.id)
       ctx.incCounter(backoffGlobalSleep)
       profile(backoff_idle):
         ctx.threadpool.globalBackoff.sleep(ticket)
-      debugTermination: log("Worker %3d: eventLoop 2.b - waking\n", ctx.id)
+      debugTermination: log("Worker %3d: eventLoop 2.d - waking\n", ctx.id)
 
 # ############################################################
 #                                                            #
@@ -975,20 +1001,37 @@ proc completeFuture[T](fv: Flowvar[T], parentResult: var T) {.raises:[].} =
 
       debug: log("Worker %3d: sync 2.2 - stole task 0x%.08x (parent 0x%.08x, current 0x%.08x, awaitedTask 0x%.08x)\n", ctx.id, stolenTask, stolenTask.parent, ctx.currentTask, fv.task)
       ctx.run(stolenTask)
+
+    elif (
+        var globalTask = ctx.tryDrainGlobalQueue()
+        ctx.globalQueueCheckCounter = 0
+        not globalTask.isNil):
+      # We got a task from the global queue, there might be more work for idle threads, wake one
+      ctx.threadpool.globalBackoff.wake()
+      ctx.incCounter(backoffGlobalSignalSent)
+
+      ctx.incCounter(theftsAwaiting)
+      ctx.incCounter(itersStolen):
+        if globalTask.loopStepsLeft == NotALoop: 0
+        else: globalTask.loopStepsLeft
+
+      debug: log("Worker %3d: sync 2.3 - global task 0x%.08x (parent 0x%.08x, current 0x%.08x, awaitedTask 0x%.08x)\n", ctx.id, globalTask, globalTask.parent, ctx.currentTask, fv.task)
+      ctx.run(globalTask)
+
     elif (let (ownTask, _) = ctx.taskqueue[].dequeue(); not ownTask.isNil):
       # We advance our own queue, this increases global throughput but may impact latency on the awaited task.
-      debug: log("Worker %3d: sync 2.3 - couldn't steal, running own task (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
+      debug: log("Worker %3d: sync 2.4 - couldn't steal, running own task (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
       ctx.incCounter(unrelatedTasksExecuted)
       ctx.run(ownTask)
     else:
       # Nothing to do, we park.
       # - On today's hyperthreaded systems, this might reduce contention on a core resources like memory caches and execution ports
       # - If more work is created, we won't be notified as we need to park on a dedicated notifier for precise wakeup when future is ready
-      debugTermination: log("Worker %3d: sync 2.4 - Empty runtime, parking (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
+      debugTermination: log("Worker %3d: sync 2.5 - Empty runtime, parking (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
       ctx.incCounter(backoffTaskAwaited)
       profile(backoff_awaiting):
         fv.getTask().sleepUntilComplete(ctx.id)
-      debugTermination: log("Worker %3d: sync 2.4 - signaled, waking (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
+      debugTermination: log("Worker %3d: sync 2.5 - signaled, waking (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
 
 proc syncAll*(tp: Threadpool) {.raises: [].} =
   ## Blocks until all pending tasks are completed
