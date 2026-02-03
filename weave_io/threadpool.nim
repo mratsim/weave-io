@@ -14,6 +14,7 @@ import
   std/[atomics, macros],
   ./crossthread/[
     taskqueues,
+    channels_mpsc_unbounded_batch,
     backoff,
     scoped_barriers,
     tasks_flowvars],
@@ -30,6 +31,32 @@ export
 when defined(WVIO_THREADPOOL_METRICS):
   import ./primitives/[fileio, static_for]
 
+debug:
+  import std/importutils # Import private fields for debugging
+
+# ############################################################
+# #
+# # Adaptive Theft Configuration
+# #
+# ############################################################
+
+const WVIO_StealAdaptativeInterval* {.intdefine.} = 25
+## Number of steal requests after which a worker reevaluates
+## the steal-half vs steal-one strategy
+## Based on Weave's adaptive stealing implementation
+
+const WVIO_StealAdaptiveRatioThreshold* = 2.0f
+## Ratio threshold for switching from steal-half to steal-one
+## If ratio < threshold, tasks are coarse-grained, use steal-one
+
+const WVIO_GLOBALQUEUE_CHECK_INTERVAL* {.intdefine.} = 61
+## Workers check the global injector queue every N iterations
+## Prime number to avoid resonance with other periodic operations
+
+# ############################################################
+# #
+# # RNG
+# #
 # ############################################################
 #                                                            #
 #                            RNG                             #
@@ -141,6 +168,7 @@ let countersDesc {.compileTime.} = @[
   ("tasksScheduled", "tasks scheduled"),
   ("tasksStolen", "tasks stolen"),
   ("tasksExecuted", "tasks executed"),
+  ("tasksOverflowed", "tasks overflowed"),
   ("unrelatedTasksExecuted", "unrelated tasks executed"),
   ("loopsSplit", "loops split"),
   ("itersScheduled", "iterations scheduled"),
@@ -169,15 +197,23 @@ type
     threadpool: Threadpool
 
     # Tasks
-    taskqueue: ptr Taskqueue    # owned task queue
+    taskqueue: ptr Taskqueue # owned task queue
     currentTask: ptr Task
 
     # Synchronization
     currentScope*: ptr ScopedBarrier # need to be exported for syncScope template
-    signal: ptr Signal          # owned signal
+    signal: ptr Signal # owned signal
 
     # Thefts
-    rng: WorkStealingRng        # RNG state to select victims
+    rng: WorkStealingRng # RNG state to select victims
+
+    # Adaptive theft strategy tracking
+    stealHalfStrategy: bool # true = steal half, false = steal one
+    recentThefts: int32 # Number of steal attempts in current interval
+    recentTasks: int32 # Number of tasks processed from steals in interval
+
+    # Global queue checking
+    globalQueueCheckCounter: int32 # Counter for periodic global queue checks
 
     when defined(WVIO_THREADPOOL_METRICS):
       counters: Counters
@@ -188,6 +224,10 @@ type
     barrier{.align: 64.}: SyncBarrier                            # Barrier for initialization and teardown
     # -- align: 64
     globalBackoff{.align: 64.}: EventCount                       # Multi-Producer Multi-Consumer backoff
+    # -- align: 64
+    # Global MPSC injector queue - for overflow and foreign thread injection
+    globalQueue{.align: 64.}: ChannelMpscUnboundedBatch[ptr Task, true]
+    globalQueueDrainLock{.align: 64.}: Atomic[bool]  ## Lock for draining (MPSC: only consumer needs lock)
     # -- align: 64
     numThreads*{.align: 64.}: cint                               # N regular workers
     workerQueues: ptr UncheckedArray[Taskqueue]                  # size N
@@ -273,6 +313,14 @@ proc setupWorker(ctx: var WorkerContext) =
   # Thefts
   ctx.rng.seed(0xEFFACED + ctx.id)
 
+  # Adaptive theft - start with steal-half as it amortizes contention better
+  ctx.stealHalfStrategy = true
+  ctx.recentThefts = 0
+  ctx.recentTasks = 0
+
+  # Global queue checking - stagger starts to avoid thundering herd
+  ctx.globalQueueCheckCounter = ctx.id mod WVIO_GLOBALQUEUE_CHECK_INTERVAL
+
   # Synchronization
   ctx.currentScope = nil
   ctx.signal = addr ctx.threadpool.workerSignals[ctx.id]
@@ -283,7 +331,7 @@ proc setupWorker(ctx: var WorkerContext) =
   ctx.currentTask = nil
 
   # Init
-  ctx.taskqueue[].init(initialCapacity = 32)
+  ctx.taskqueue[].init()
 
 proc teardownWorker(ctx: var WorkerContext) =
   ## Cleanup the thread-local context of a worker
@@ -389,7 +437,7 @@ proc run(ctx: var WorkerContext, task: ptr Task) {.raises:[].} =
 
   # Sync with an awaiting thread in completeFuture that didn't find work
   # and transfer ownership of the task to it.
-  debug: log("Worker %3d: transfering task 0x%.08x to future holder\n", ctx.id, task)
+  debug: log("Worker %3d: transferring task 0x%.08x to future holder\n", ctx.id, task)
   task.setCompleted()
   task.setGcReady()
 
@@ -397,20 +445,26 @@ proc schedule(ctx: var WorkerContext, task: ptr Task, forceWake = false) {.inlin
   ## Schedule a task in the threadpool
   ## This wakes another worker if our local queue is empty
   ## or forceWake is true.
-  debug: log("Worker %3d: schedule task 0x%.08x (parent/current task 0x%.08x, scope 0x%.08x)\n", ctx.id, task, task.parent, task.scopedBarrier)
 
   # Instead of notifying every time a task is scheduled, we notify
   # only when the worker queue is empty. This is a good approximation
   # of starvation in work-stealing.
-  let wasEmpty = ctx.taskqueue[].peek() == 0
-  ctx.taskqueue[].push(task)
+  let numTasks = ctx.taskqueue[].peek()
+  debug:
+    let numGlobalTasks = ctx.threadpool.globalQueue.peek()
+  if numTasks < WVIO_TASKQUEUE_SIZE:
+    debug: log("Worker %3d: schedule task 0x%.08x in local queue (pending local/global %d/%d, parent/current task 0x%.08x, scope 0x%.08x)\n", ctx.id, task, numTasks, numGlobalTasks, task.parent, task.scopedBarrier)
+    ctx.taskqueue[].enqueue(task, useLifo = true)
 
-  ctx.incCounter(tasksScheduled)
-  ctx.incCounter(itersScheduled):
-    if task.loopStepsLeft == NotALoop: 0
-    else: task.loopStepsLeft
+    ctx.incCounter(tasksScheduled)
+    ctx.incCounter(itersScheduled):
+      if task.loopStepsLeft == NotALoop: 0
+      else: task.loopStepsLeft
+  else: # local queue full
+    debug: log("Worker %3d: schedule task 0x%.08x in global queue (pending local/global %d/%d, parent/current task 0x%.08x, scope 0x%.08x)\n", ctx.id, task, numTasks, numGlobalTasks, task.parent, task.scopedBarrier)
+    ctx.threadpool.globalQueue.send(task)
 
-  if forceWake or wasEmpty:
+  if forceWake or numTasks == 0:
     ctx.threadpool.globalBackoff.wake()
     ctx.incCounter(backoffGlobalSignalSent)
 
@@ -563,7 +617,7 @@ proc splitAndDispatchLoop(ctx: var WorkerContext, task: ptr Task, curLoopIndex: 
     debugSplit:
       log("Worker %3d: task 0x%.08x - %8d step(s) sent in task 0x%.08x (start: %3d, stop: %3d, stride: %3d)\n",
            ctx.id, task, upperSplit.loopStepsLeft, upperSplit, upperSplit.loopStart, upperSplit.loopStop, upperSplit.loopStride)
-    ctx.taskqueue[].push(upperSplit)
+    ctx.taskqueue[].enqueue(upperSplit, useLifo = true)
 
   ctx.threadpool.globalBackoff.wakeAll()
   ctx.incCounter(backoffGlobalSignalSent)
@@ -650,6 +704,35 @@ template parallelReduceWrapper(
 #                                                            #
 # ############################################################
 
+proc updateStealStrategy(ctx: var WorkerContext) {.inline.} =
+  ## Update the steal strategy based on recent theft efficiency
+  ## If steal-half is used but tasks are coarse-grained (low task/theft ratio),
+  ## switch to steal-one to reduce unnecessary stealing
+  ## If steal-one is used but all processed tasks were stolen (ratio = 1),
+  ## switch to steal-half to amortize contention costs
+  ##
+  ## Embracing Explicit Communication in Work-Stealing Runtime Systems
+  ## Andreas Prell, 2016, Chapter 5.1 (page 103)
+  ## https://epub.uni-bayreuth.de/id/eprint/2990/1/main_final.pdf
+
+  # Check if we've reached the adaptation interval
+  if ctx.recentThefts >= WVIO_StealAdaptativeInterval:
+    # Calculate efficiency ratio: tasks processed per steal attempt
+    let ratio = ctx.recentTasks.float32 / ctx.recentThefts.float32
+
+    if ctx.stealHalfStrategy and ratio < WVIO_StealAdaptiveRatioThreshold:
+      # Tasks are coarse-grained, stealing half leads to re-stealing
+      # Switch to steal-one for better granularity
+      ctx.stealHalfStrategy = false
+    elif not ctx.stealHalfStrategy and ratio <= 1.0f:
+      # All processed tasks were stolen, we need to steal in batches
+      # to amortize contention costs
+      ctx.stealHalfStrategy = true
+
+    # Reset interval counters
+    ctx.recentThefts = 0
+    ctx.recentTasks = 0
+
 proc tryStealOne(ctx: var WorkerContext): ptr Task =
   ## Try to steal a task.
   let seed = ctx.rng.nextU32()
@@ -657,11 +740,35 @@ proc tryStealOne(ctx: var WorkerContext): ptr Task =
     if targetId == ctx.id:
       continue
 
-    let stolenTask = ctx.id.steal(ctx.threadpool.workerQueues[targetId])
+    let stolenTask = ctx.id.stealOne(ctx.threadpool.workerQueues[targetId])
 
     if not stolenTask.isNil():
+      ctx.recentThefts += 1
+      ctx.recentTasks += 1
       return stolenTask
   return nil
+
+proc tryStealHalf(ctx: var WorkerContext): ptr Task =
+  ## Try to steal half the tasks of a worker.
+  let seed = ctx.rng.nextU32()
+  for targetId in seed.pseudoRandomPermutation(ctx.threadpool.numThreads):
+    if targetId == ctx.id:
+      continue
+
+    let (stolenTask, numStolen) = ctx.id.stealHalf(ctx.threadpool.workerQueues[targetId], ctx.taskqueue[])
+
+    if not stolenTask.isNil():
+      ctx.recentThefts += 1
+      ctx.recentTasks += numStolen
+      return stolenTask
+  return nil
+
+proc trySteal(ctx: var WorkerContext): ptr Task =
+  ctx.updateStealStrategy()
+  if ctx.stealHalfStrategy:
+    return ctx.tryStealHalf()
+  else:
+    return ctx.tryStealOne()
 
 proc tryLeapfrog(ctx: var WorkerContext, awaitedTask: ptr Task): ptr Task =
   ## Leapfrogging:
@@ -674,31 +781,70 @@ proc tryLeapfrog(ctx: var WorkerContext, awaitedTask: ptr Task): ptr Task =
   ## If they have tasks in their queue, it's the task we are awaiting that created them and it will likely be stuck
   ## on those tasks as well, so we need to help them help us.
 
-  var thiefID = SentinelThief
-  while true:
-    debug: log("Worker %3d: leapfrogging - waiting for thief of task 0x%.08x to publish their ID (thiefID read %d)\n", ctx.id, awaitedTask, thiefID)
-    thiefID = awaitedTask.getThief()
-    if thiefID != SentinelThief:
-      break
-    cpuRelax()
-  ascertain: 0 <= thiefID and thiefID < ctx.threadpool.numThreads
+  # TODO: We might want a sentinel value for tasks sent back to global queues
 
-  let leapTask = ctx.id.steal(ctx.threadpool.workerQueues[thiefID])
+  let thiefID = awaitedTask.getThief()
+  if thiefID != SentinelThief:
+    debug: log("Worker %3d: leapfrogging - thief found for task 0x%.08x (thiefID %d)\n", ctx.id, awaitedTask, thiefID)
+    ascertain: 0 <= thiefID and thiefID < ctx.threadpool.numThreads
+  else:
+    debug: log("Worker %3d: leapfrogging - thief not found for task 0x%.08x (thiefID %d)\n", ctx.id, awaitedTask, thiefID)
+    return nil
+
+  let leapTask = stealOne(ctx.id, ctx.threadpool.workerQueues[thiefID])
   if not leapTask.isNil():
     return leapTask
   return nil
+
+proc tryDrainGlobalQueue(ctx: var WorkerContext): ptr Task =
+  ## Try to drain tasks from the global MPSC queue.
+  ## Returns the first task if any were retrieved, nil otherwise.
+  ## Draining is protected by a lock since this is the consumer side of MPSC.
+
+  # Try to acquire the drain lock
+  var expected = false
+  if not ctx.threadpool.globalQueueDrainLock.compareExchange(expected, true, moAcquire, moRelaxed):
+    return nil  # Another worker is draining
+
+  # Try to receive a batch of up to slot lefts tasks
+  var firstTask, lastTask: ptr Task
+  let count = ctx.threadpool.globalQueue.tryRecvBatch(firstTask, lastTask, max = WVIO_TASKQUEUE_SIZE div 2)
+  ctx.threadpool.globalQueueDrainLock.store(false, moRelease)
+
+  ascertain: count <= WVIO_TASKQUEUE_SIZE div 2
+  if count == 0:
+    return nil
+
+  # We got tasks - enqueue all except the first one to our local queue
+  # Tasks are linked in a chain: firstTask -> ... -> lastTask
+  # Enqueueing cannot overflow as we limited batch dequeueing to half the size of the local queue
+  ctx.taskqueue[].enqueueBatch(taskList = firstTask.next.load(moRelaxed))
+
+  debug: log("Worker %3d: drained %d tasks from global queue\n", ctx.id, count)
+  return firstTask
 
 proc eventLoop(ctx: var WorkerContext) {.raises:[], gcsafe.} =
   ## Each worker thread executes this loop over and over.
   while true:
     # 1. Pick from local queue
     debug: log("Worker %3d: eventLoop 1 - searching task from local queue\n", ctx.id)
-    while (var task = ctx.taskqueue[].pop(); not task.isNil):
+    while (var (task, _) = ctx.taskqueue[].dequeue(); not task.isNil):
       debug: log("Worker %3d: eventLoop 1 - running task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, task, task.parent, ctx.currentTask)
       ctx.run(task)
 
     # 2. Run out of tasks, become a thief
     debug: log("Worker %3d: eventLoop 2 - becoming a thief\n", ctx.id)
+
+    # 2a. Check global injector queue periodically
+    ctx.globalQueueCheckCounter += 1
+    if ctx.globalQueueCheckCounter >= WVIO_GLOBALQUEUE_CHECK_INTERVAL:
+      ctx.globalQueueCheckCounter = 0
+      if (var globalTask = ctx.tryDrainGlobalQueue(); not globalTask.isNil):
+        debug: log("Worker %3d: eventLoop 2a - got task from global queue 0x%.08x (parent 0x%.08x, current 0x%.08x)\n",
+                   ctx.id, globalTask, globalTask.parent, ctx.currentTask)
+        ctx.run(globalTask)
+        continue  # Go back to local queue processing
+
     let ticket = ctx.threadpool.globalBackoff.sleepy()
     if (var stolenTask = ctx.tryStealOne(); not stolenTask.isNil):
       # We manage to steal a task, cancel sleep
@@ -716,18 +862,39 @@ proc eventLoop(ctx: var WorkerContext) {.raises:[], gcsafe.} =
       # 2.a Run task
       debug: log("Worker %3d: eventLoop 2.a - stole task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, stolenTask, stolenTask.parent, ctx.currentTask)
       ctx.run(stolenTask)
+    elif (
+        var globalTask = ctx.tryDrainGlobalQueue()
+        ctx.globalQueueCheckCounter = 0
+        not globalTask.isNil):
+      # We got a task from the global queue, cancel sleep
+      # We manage to steal a task, cancel sleep
+      ctx.threadpool.globalBackoff.cancelSleep()
+      # Theft successful, there might be more work for idle threads, wake one
+      # cancelSleep must be done before as wake has an optimization
+      # to not notify when a thread is sleepy
+      ctx.threadpool.globalBackoff.wake()
+      ctx.incCounter(backoffGlobalSignalSent)
+
+      ctx.incCounter(theftsIdle)
+      ctx.incCounter(itersStolen):
+        if globalTask.loopStepsLeft == NotALoop: 0
+        else: globalTask.loopStepsLeft
+      # 2.a Run task
+      debug: log("Worker %3d: eventLoop 2.a - stole task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, globalTask, globalTask.parent, ctx.currentTask)
+      ctx.run(globalTask)
+
     elif ctx.signal.terminate.load(moAcquire):
       # 2.b Threadpool has no more tasks and we were signaled to terminate
       ctx.threadpool.globalBackoff.cancelSleep()
-      debugTermination: log("Worker %3d: eventLoop 2.b - terminated\n", ctx.id)
+      debugTermination: log("Worker %3d: eventLoop 2.c - terminated\n", ctx.id)
       break
     else:
       # 2.c Park the thread until a new task enters the threadpool
-      debugTermination: log("Worker %3d: eventLoop 2.b - sleeping\n", ctx.id)
+      debugTermination: log("Worker %3d: eventLoop 2.d - sleeping\n", ctx.id)
       ctx.incCounter(backoffGlobalSleep)
       profile(backoff_idle):
         ctx.threadpool.globalBackoff.sleep(ticket)
-      debugTermination: log("Worker %3d: eventLoop 2.b - waking\n", ctx.id)
+      debugTermination: log("Worker %3d: eventLoop 2.d - waking\n", ctx.id)
 
 # ############################################################
 #                                                            #
@@ -749,12 +916,17 @@ proc completeFuture[T](fv: Flowvar[T], parentResult: var T) {.raises:[].} =
     return
 
   ## 1. Process all the children of the current tasks first, ignoring the rest.
-  debug: log("Worker %3d: sync 1 - searching task from local queue (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
-  while (let task = ctx.taskqueue[].pop(); not task.isNil):
+  debug:
+    privateAccess(Flowvar) # Access unexported field for debugging
+    log("Worker %3d: sync 1 - searching task from local queue (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
+  while (let (task, _) = ctx.taskqueue[].dequeue(); not task.isNil):
     if task.parent != ctx.currentTask:
-      debug: log("Worker %3d: sync 1 - skipping non-direct descendant task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, task, task.parent, ctx.currentTask)
-      ctx.schedule(task, forceWake = true) # reschedule task and wake a sibling to take it over.
-      break
+      # In a throughput optimized framework LIFO, we would focus on direct descendants only
+      # and reschedule those tasks and force-wake another thread if any is idle.
+      # But here we want to maintain fairness, and also with FIFO queues
+      # the non-direct descendant tasks are rescheduled `last` (and not `next`) which is very unfair,
+      # and even leads to livelocks.
+      debug: log("Worker %3d: sync 1 - found non-direct descendant task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, task, task.parent, ctx.currentTask)
     debug: log("Worker %3d: sync 1 - running task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, task, task.parent, ctx.currentTask)
     ctx.run(task)
     if isFutReady():
@@ -829,20 +1001,37 @@ proc completeFuture[T](fv: Flowvar[T], parentResult: var T) {.raises:[].} =
 
       debug: log("Worker %3d: sync 2.2 - stole task 0x%.08x (parent 0x%.08x, current 0x%.08x, awaitedTask 0x%.08x)\n", ctx.id, stolenTask, stolenTask.parent, ctx.currentTask, fv.task)
       ctx.run(stolenTask)
-    elif (let ownTask = ctx.taskqueue[].pop(); not ownTask.isNil):
+
+    elif (
+        var globalTask = ctx.tryDrainGlobalQueue()
+        ctx.globalQueueCheckCounter = 0
+        not globalTask.isNil):
+      # We got a task from the global queue, there might be more work for idle threads, wake one
+      ctx.threadpool.globalBackoff.wake()
+      ctx.incCounter(backoffGlobalSignalSent)
+
+      ctx.incCounter(theftsAwaiting)
+      ctx.incCounter(itersStolen):
+        if globalTask.loopStepsLeft == NotALoop: 0
+        else: globalTask.loopStepsLeft
+
+      debug: log("Worker %3d: sync 2.3 - global task 0x%.08x (parent 0x%.08x, current 0x%.08x, awaitedTask 0x%.08x)\n", ctx.id, globalTask, globalTask.parent, ctx.currentTask, fv.task)
+      ctx.run(globalTask)
+
+    elif (let (ownTask, _) = ctx.taskqueue[].dequeue(); not ownTask.isNil):
       # We advance our own queue, this increases global throughput but may impact latency on the awaited task.
-      debug: log("Worker %3d: sync 2.3 - couldn't steal, running own task (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
+      debug: log("Worker %3d: sync 2.4 - couldn't steal, running own task (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
       ctx.incCounter(unrelatedTasksExecuted)
       ctx.run(ownTask)
     else:
       # Nothing to do, we park.
       # - On today's hyperthreaded systems, this might reduce contention on a core resources like memory caches and execution ports
       # - If more work is created, we won't be notified as we need to park on a dedicated notifier for precise wakeup when future is ready
-      debugTermination: log("Worker %3d: sync 2.4 - Empty runtime, parking (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
+      debugTermination: log("Worker %3d: sync 2.5 - Empty runtime, parking (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
       ctx.incCounter(backoffTaskAwaited)
       profile(backoff_awaiting):
         fv.getTask().sleepUntilComplete(ctx.id)
-      debugTermination: log("Worker %3d: sync 2.4 - signaled, waking (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
+      debugTermination: log("Worker %3d: sync 2.5 - signaled, waking (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
 
 proc syncAll*(tp: Threadpool) {.raises: [].} =
   ## Blocks until all pending tasks are completed
@@ -860,7 +1049,7 @@ proc syncAll*(tp: Threadpool) {.raises: [].} =
   while true:
     # 1. Empty local tasks
     debug: log("Worker %3d: syncAll 1 - searching task from local queue\n", ctx.id)
-    while (let task = ctx.taskqueue[].pop(); not task.isNil):
+    while (let (task, _) = ctx.taskqueue[].dequeue(); not task.isNil):
       debug: log("Worker %3d: syncAll 1 - running task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, task, task.parent, ctx.currentTask)
       ctx.run(task)
 
@@ -901,7 +1090,7 @@ proc wait(scopedBarrier: ptr ScopedBarrier) {.raises:[], gcsafe.} =
   while scopedBarrier.hasDescendantTasks():
     # 1. Empty local tasks, the initial loop only has tasks from that scope or a child scope.
     debug: log("Worker %3d: syncScope 1 - searching task from local queue\n", ctx.id)
-    while (let task = ctx.taskqueue[].pop(); not task.isNil):
+    while (let (task, _) = ctx.taskqueue[].dequeue(); not task.isNil):
       debug: log("Worker %3d: syncScope 1 - running task 0x%.08x (parent 0x%.08x, current 0x%.08x, scope 0x%.08x)\n", ctx.id, task, task.parent, ctx.currentTask, task.scopedBarrier)
       ctx.run(task)
       if not scopedBarrier.hasDescendantTasks():
@@ -942,6 +1131,8 @@ proc wvio_threadpool_new(num_threads: cint): Threadpool {.raises: [ResourceExhau
   let tp = allocHeapUncheckedAlignedPtr(Threadpool, sizeof(TpObj), alignment = 64)
   tp.barrier.init(numThreads)
   tp.globalBackoff.initialize()
+  tp.globalQueue.initialize()
+  tp.globalQueueDrainLock.store(false, moRelaxed)
   tp.numThreads = numThreads
   tp.workerQueues = allocHeapArrayAligned(Taskqueue, numThreads, alignment = 64)
   tp.workers = allocHeapArrayAligned(Thread[(Threadpool, WorkerID)], numThreads, alignment = 64)
@@ -1082,7 +1273,11 @@ proc sync*[T](fv: sink Flowvar[T]): T {.noInit, inline, gcsafe.} =
   ## and returned.
   ## The thread is not idle and will complete pending tasks.
   profileStop(run_task)
+  debug:
+    privateAccess(Flowvar)
+    let task_id = fv.task
   completeFuture(fv, result)
+  debug: log("Garbage collecting awaited task 0x%.08x\n", task_id)
   cleanup(fv)
   profileStart(run_task)
 
