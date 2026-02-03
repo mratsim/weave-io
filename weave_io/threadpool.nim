@@ -31,6 +31,9 @@ export
 when defined(WVIO_THREADPOOL_METRICS):
   import ./primitives/[fileio, static_for]
 
+debug:
+  import std/importutils # Import private fields for debugging
+
 # ############################################################
 # #
 # # Adaptive Theft Configuration
@@ -888,12 +891,17 @@ proc completeFuture[T](fv: Flowvar[T], parentResult: var T) {.raises:[].} =
     return
 
   ## 1. Process all the children of the current tasks first, ignoring the rest.
-  debug: log("Worker %3d: sync 1 - searching task from local queue (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
+  debug:
+    privateAccess(Flowvar) # Access unexported field for debugging
+    log("Worker %3d: sync 1 - searching task from local queue (awaitedTask 0x%.08x)\n", ctx.id, fv.task)
   while (let (task, _) = ctx.taskqueue[].dequeue(); not task.isNil):
     if task.parent != ctx.currentTask:
-      debug: log("Worker %3d: sync 1 - skipping non-direct descendant task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, task, task.parent, ctx.currentTask)
-      ctx.schedule(task, forceWake = true) # reschedule task and wake a sibling to take it over.
-      break
+      # In a throughput optimized framework LIFO, we would focus on direct descendants only
+      # and reschedule those tasks and force-wake another thread if any is idle.
+      # But here we want to maintain fairness, and also with FIFO queues
+      # the non-direct descendant tasks are rescheduled `last` (and not `next`) which is very unfair,
+      # and even leads to livelocks.
+      debug: log("Worker %3d: sync 1 - found non-direct descendant task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, task, task.parent, ctx.currentTask)
     debug: log("Worker %3d: sync 1 - running task 0x%.08x (parent 0x%.08x, current 0x%.08x)\n", ctx.id, task, task.parent, ctx.currentTask)
     ctx.run(task)
     if isFutReady():
