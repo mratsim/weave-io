@@ -437,7 +437,7 @@ proc run(ctx: var WorkerContext, task: ptr Task) {.raises:[].} =
 
   # Sync with an awaiting thread in completeFuture that didn't find work
   # and transfer ownership of the task to it.
-  debug: log("Worker %3d: transfering task 0x%.08x to future holder\n", ctx.id, task)
+  debug: log("Worker %3d: transferring task 0x%.08x to future holder\n", ctx.id, task)
   task.setCompleted()
   task.setGcReady()
 
@@ -778,14 +778,13 @@ proc tryLeapfrog(ctx: var WorkerContext, awaitedTask: ptr Task): ptr Task =
   ## If they have tasks in their queue, it's the task we are awaiting that created them and it will likely be stuck
   ## on those tasks as well, so we need to help them help us.
 
-  var thiefID = SentinelThief
-  while true:
-    debug: log("Worker %3d: leapfrogging - waiting for thief of task 0x%.08x to publish their ID (thiefID read %d)\n", ctx.id, awaitedTask, thiefID)
-    thiefID = awaitedTask.getThief()
-    if thiefID != SentinelThief:
-      break
-    cpuRelax()
-  ascertain: 0 <= thiefID and thiefID < ctx.threadpool.numThreads
+  let thiefID = awaitedTask.getThief()
+  if thiefID != SentinelThief:
+    debug: log("Worker %3d: leapfrogging - thief found for task 0x%.08x (thiefID %d)\n", ctx.id, awaitedTask, thiefID)
+    ascertain: 0 <= thiefID and thiefID < ctx.threadpool.numThreads
+  else:
+    debug: log("Worker %3d: leapfrogging - thief not found for task 0x%.08x (thiefID %d)\n", ctx.id, awaitedTask, thiefID)
+    return nil
 
   let leapTask = stealOne(ctx.id, ctx.threadpool.workerQueues[thiefID])
   if not leapTask.isNil():
@@ -1231,7 +1230,11 @@ proc sync*[T](fv: sink Flowvar[T]): T {.noInit, inline, gcsafe.} =
   ## and returned.
   ## The thread is not idle and will complete pending tasks.
   profileStop(run_task)
+  debug:
+    privateAccess(Flowvar)
+    let task_id = fv.task
   completeFuture(fv, result)
+  debug: log("Garbage collecting awaited task 0x%.08x\n", task_id)
   cleanup(fv)
   profileStart(run_task)
 
